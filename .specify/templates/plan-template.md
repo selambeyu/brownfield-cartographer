@@ -31,7 +31,13 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+Verify compliance with `.specify/memory/constitution.md`:
+
+- **Core Principles**: Spec-first, evidence-driven analysis, knowledge graph as source of truth
+- **Architectural Laws**: Agent boundaries (Surveyor, Hydrologist, Semanticist, Archivist, Navigator), idempotent pipelines
+- **Development Protocol**: Spec and plan exist; tasks derived from plan; logging/traceability
+- **Relevant sections**: Agent Design Standards, Data Governance, LLM Usage Policy, Artifact Standards, Security Rules, FDE Readiness as applicable to the feature
+- **Project Structure**: Source layout matches constitution (src/cli.py, orchestrator, models/, analyzers/, agents/, graph/); artifacts under .cartography/
 
 ## Project Structure
 
