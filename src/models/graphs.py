@@ -1,0 +1,20 @@
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel
+
+
+class RunConfig(BaseModel):
+    repo: str
+    out: str = ".cartography"
+    incremental: bool = False
+    llm_enabled: bool = False
+
+
+class GraphArtifact(BaseModel):
+    schema_version: str = "0.1"
+    graph_type: Literal["module_graph", "lineage_graph", "knowledge_graph"] = "knowledge_graph"
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+
