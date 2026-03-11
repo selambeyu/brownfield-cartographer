@@ -1,0 +1,25 @@
+# .cartography/
+
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.venv/
+venv/
+ENV/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+build/
+dist/
+*.egg-info/
+
+.DS_Store
+Thumbs.db
+
+.idea/
+.vscode/
+
