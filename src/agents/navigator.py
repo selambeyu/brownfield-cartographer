@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -222,4 +223,195 @@ def query_explain_module(
         "documentation_drift": semantic_payload.get("documentation_drift", "unknown"),
         "evidence_method": "static_analysis_graph" if not semantic_payload else "static_plus_llm_semantic",
     }
+
+
+def _find_implementation_in_module_graph(module_graph_path: str, concept: str, limit: int = 8) -> dict[str, Any]:
+    graph = _load_module_graph(module_graph_path)
+    q = concept.strip().lower()
+    matches: list[dict[str, Any]] = []
+    for n in graph.get("nodes", []):
+        if n.get("type") != "module":
+            continue
+        path = str(n.get("path") or "")
+        imports = [str(i).lower() for i in n.get("imports", [])]
+        funcs = [str(f).lower() for f in n.get("public_functions", [])]
+        hay = " ".join([path.lower(), " ".join(imports), " ".join(funcs)])
+        if q and q in hay:
+            matches.append(
+                {
+                    "module": path,
+                    "public_functions": n.get("public_functions", []),
+                    "evidence_method": "semantic_keyword_match",
+                }
+            )
+    return {"concept": concept, "matches": matches[:limit], "evidence_method": "semantic_keyword_match"}
+
+
+def _find_implementation_in_vector_store(semantic_index_dir: str, concept: str, limit: int = 8) -> dict[str, Any] | None:
+    db_path = Path(semantic_index_dir) / "vector_db"
+    if not db_path.exists():
+        return None
+    try:
+        import chromadb
+    except Exception:
+        return None
+    try:
+        client = chromadb.PersistentClient(path=str(db_path))
+        collection = client.get_collection(name="module_purposes")
+        result = collection.query(query_texts=[concept], n_results=max(1, limit))
+    except Exception:
+        return None
+
+    ids = (result.get("ids") or [[]])[0]
+    distances = (result.get("distances") or [[]])[0]
+    metadatas = (result.get("metadatas") or [[]])[0]
+    documents = (result.get("documents") or [[]])[0]
+    matches: list[dict[str, Any]] = []
+    for idx, module_id in enumerate(ids):
+        metadata = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
+        distance = distances[idx] if idx < len(distances) else None
+        purpose = documents[idx] if idx < len(documents) else None
+        score = None
+        if isinstance(distance, (int, float)):
+            score = max(0.0, 1.0 - float(distance))
+        matches.append(
+            {
+                "module": metadata.get("path") or module_id,
+                "language": metadata.get("language"),
+                "documentation_drift": metadata.get("documentation_drift", "unknown"),
+                "purpose_statement": purpose,
+                "similarity": score,
+                "evidence_method": "vector_similarity_chromadb",
+            }
+        )
+    return {
+        "concept": concept,
+        "matches": matches,
+        "vector_store": "chromadb",
+        "evidence_method": "vector_similarity_chromadb",
+    }
+
+
+def query_natural_language(
+    *,
+    question: str,
+    out_dir: str = ".cartography",
+) -> dict[str, Any]:
+    """
+    Natural-language query mode with optional LangGraph orchestration.
+
+    Falls back to deterministic rule routing if langgraph is unavailable.
+    """
+    base = Path(out_dir)
+    lineage_path = str(base / "lineage_graph.json")
+    module_graph_path = str(base / "module_graph.json")
+    semantic_index_dir = str(base / "semantic_index")
+    q = question.strip()
+    low = q.lower()
+
+    def _route_and_answer(qtext: str) -> dict[str, Any]:
+        # trace-lineage intent
+        if any(k in low for k in ("upstream", "downstream", "lineage", "depends on", "produces")):
+            direction: Literal["upstream", "downstream"] = "downstream" if "downstream" in low else "upstream"
+            dataset = qtext
+            m = re.search(r"(?:table|dataset)\s+([A-Za-z0-9_\\.:-]+)", qtext, flags=re.IGNORECASE)
+            if m:
+                dataset = m.group(1)
+            return {
+                "intent": "trace_lineage",
+                "answer": query_trace_lineage(
+                    lineage_graph_path=lineage_path,
+                    dataset=dataset,
+                    direction=direction,
+                ),
+            }
+        # blast radius intent
+        if any(k in low for k in ("blast radius", "what breaks", "impact", "affected by")):
+            node = qtext
+            m = re.search(r"(?:module|dataset|node)\s+([A-Za-z0-9_./:-]+)", qtext, flags=re.IGNORECASE)
+            if m:
+                node = m.group(1)
+            return {
+                "intent": "blast_radius",
+                "answer": query_blast_radius(lineage_graph_path=lineage_path, node=node),
+            }
+        # explain module intent
+        if any(k in low for k in ("explain", "what does", "describe module")):
+            module = qtext
+            m = re.search(r"(src/[A-Za-z0-9_./-]+)", qtext)
+            if m:
+                module = m.group(1)
+            return {
+                "intent": "explain_module",
+                "answer": query_explain_module(
+                    module_graph_path=module_graph_path,
+                    module_path=module,
+                    semantic_index_dir=semantic_index_dir,
+                ),
+            }
+        # find implementation intent (semantic search over module metadata)
+        if any(k in low for k in ("where is", "implementation", "logic", "located")):
+            concept = qtext
+            m = re.search(r"where is (.+)", qtext, flags=re.IGNORECASE)
+            if m:
+                concept = m.group(1)
+            vector_result = _find_implementation_in_vector_store(semantic_index_dir, concept)
+            if vector_result is not None and vector_result.get("matches"):
+                return {
+                    "intent": "find_implementation",
+                    "answer": vector_result,
+                }
+            return {
+                "intent": "find_implementation",
+                "answer": _find_implementation_in_module_graph(module_graph_path, concept),
+            }
+
+        return {
+            "intent": "unknown",
+            "answer": {
+                "error": "Could not route query to a supported tool.",
+                "supported_intents": [
+                    "trace_lineage",
+                    "blast_radius",
+                    "explain_module",
+                    "find_implementation",
+                ],
+                "evidence_method": "rule_router",
+            },
+        }
+
+    # Optional LangGraph orchestration.
+    try:
+        from langgraph.graph import END, START, StateGraph  # type: ignore
+
+        class _State(dict):
+            pass
+
+        def _node_route(state: _State) -> _State:
+            routed = _route_and_answer(state["question"])
+            state["intent"] = routed["intent"]
+            state["answer"] = routed["answer"]
+            state["method"] = "langgraph_router"
+            return state
+
+        graph = StateGraph(dict)
+        graph.add_node("route", _node_route)
+        graph.add_edge(START, "route")
+        graph.add_edge("route", END)
+        app = graph.compile()
+        final = app.invoke({"question": q})
+        return {
+            "question": q,
+            "intent": final.get("intent"),
+            "result": final.get("answer"),
+            "evidence_method": "langgraph_tool_router",
+        }
+    except Exception:
+        routed = _route_and_answer(q)
+        return {
+            "question": q,
+            "intent": routed["intent"],
+            "result": routed["answer"],
+            "evidence_method": "rule_router",
+        }
 

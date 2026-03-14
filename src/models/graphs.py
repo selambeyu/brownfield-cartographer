@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class RunConfig(BaseModel):
@@ -22,6 +22,6 @@ class ArtifactMetadata(BaseModel):
 class GraphArtifact(BaseModel):
     schema_version: str = "0.1"
     graph_type: Literal["module_graph", "lineage_graph", "knowledge_graph"] = "knowledge_graph"
-    nodes: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)
 

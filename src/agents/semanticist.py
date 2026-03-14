@@ -578,6 +578,111 @@ def answer_day_one_questions(
     }
 
 
+def _persist_vector_store(semantic_dir: Path, per_module: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Persist module purpose statements in a real vector DB (Chroma).
+
+    The JSON artifacts remain the source of truth for traceability, while this
+    collection enables semantic nearest-neighbor queries.
+    """
+    try:
+        import chromadb
+    except Exception as e:
+        return {"enabled": False, "backend": "chromadb", "error": f"import_failed: {e}"}
+
+    db_path = semantic_dir / "vector_db"
+    db_path.mkdir(parents=True, exist_ok=True)
+    collection_name = "module_purposes"
+    try:
+        client = chromadb.PersistentClient(path=str(db_path))
+        collection = client.get_or_create_collection(name=collection_name, metadata={"hnsw:space": "cosine"})
+
+        # Replace existing contents for deterministic re-runs.
+        existing = collection.get(include=[])
+        existing_ids = existing.get("ids") or []
+        if existing_ids:
+            collection.delete(ids=existing_ids)
+
+        ids: List[str] = []
+        docs: List[str] = []
+        metadatas: List[Dict[str, Any]] = []
+        for module_path, payload in per_module.items():
+            purpose = str(payload.get("purpose_statement") or "").strip()
+            if not purpose:
+                continue
+            ids.append(module_path)
+            docs.append(purpose)
+            metadatas.append(
+                {
+                    "path": module_path,
+                    "language": str(payload.get("language") or "unknown"),
+                    "documentation_drift": str(payload.get("documentation_drift") or "unknown"),
+                }
+            )
+
+        if ids:
+            collection.add(ids=ids, documents=docs, metadatas=metadatas)
+
+        return {
+            "enabled": True,
+            "backend": "chromadb",
+            "collection": collection_name,
+            "path": str(db_path),
+            "indexed_items": len(ids),
+        }
+    except Exception as e:
+        return {"enabled": False, "backend": "chromadb", "path": str(db_path), "error": str(e)}
+
+
+def _backfill_module_graph_semantics(
+    module_graph_path: str,
+    per_module: Dict[str, Dict[str, Any]],
+    domain_info: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Update module_graph nodes with semantic fields produced by Semanticist.
+
+    This keeps `module_graph.json` aligned with the semantic index so downstream
+    tools see purpose/domain directly on module nodes.
+    """
+    p = Path(module_graph_path)
+    if not p.exists():
+        return {"updated": False, "reason": "module_graph_missing"}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"updated": False, "reason": f"module_graph_read_failed: {e}"}
+
+    nodes = data.get("nodes", [])
+    assignments = domain_info.get("assignments", {}) if isinstance(domain_info, dict) else {}
+    clusters = domain_info.get("clusters", {}) if isinstance(domain_info, dict) else {}
+    updated_count = 0
+    for node in nodes:
+        if node.get("type") != "module":
+            continue
+        module_path = node.get("path")
+        if not module_path:
+            continue
+        payload = per_module.get(module_path)
+        if not payload:
+            continue
+        node["purpose_statement"] = payload.get("purpose_statement")
+        cluster_id = assignments.get(module_path)
+        cluster_payload = {}
+        if cluster_id is not None:
+            cluster_payload = clusters.get(cluster_id, {}) or clusters.get(str(cluster_id), {})
+        cluster_label = cluster_payload.get("label") if isinstance(cluster_payload, dict) else None
+        node["domain_cluster"] = str(cluster_label or cluster_id) if cluster_id is not None else None
+        updated_count += 1
+
+    data["nodes"] = nodes
+    try:
+        p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        return {"updated": False, "reason": f"module_graph_write_failed: {e}"}
+    return {"updated": True, "modules_backfilled": updated_count}
+
+
 def run_semanticist(
     cfg: RunConfig,
     module_graph_path: str,
@@ -628,6 +733,12 @@ def run_semanticist(
 
     domain_info = cluster_into_domains(purposes_for_clustering) if per_module else {"clusters": {}, "assignments": {}}
 
+    module_graph_backfill = _backfill_module_graph_semantics(
+        module_graph_path=module_graph_path,
+        per_module=per_module,
+        domain_info=domain_info,
+    )
+
     # Persist semantic index artifacts.
     modules_path = semantic_dir / "modules.json"
     domains_path = semantic_dir / "domains.json"
@@ -635,6 +746,8 @@ def run_semanticist(
         json.dump(per_module, f, indent=2)
     with domains_path.open("w", encoding="utf-8") as f:
         json.dump(domain_info, f, indent=2)
+
+    vector_index = _persist_vector_store(semantic_dir, per_module)
 
     # Day-One answers are optional and primarily expected to feed Archivist.
     survey_metrics = {
@@ -680,6 +793,8 @@ def run_semanticist(
         "modules_indexed": len(per_module),
         "domains": len(domain_info.get("clusters", {})),
         "semantic_index_dir": str(semantic_dir),
+        "module_graph_backfill": module_graph_backfill,
+        "vector_store": vector_index,
         "llm_enabled": cfg.llm_enabled and (llm is not None and llm.enabled()),
         "tokens_used_estimate": budget.used_tokens,
     }

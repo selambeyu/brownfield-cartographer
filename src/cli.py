@@ -6,7 +6,7 @@ from pathlib import Path
 import typer
 from dotenv import load_dotenv
 
-from .agents.navigator import query_blast_radius, query_explain_module, query_trace_lineage
+from .agents.navigator import query_blast_radius, query_explain_module, query_natural_language, query_trace_lineage
 from .models.graphs import RunConfig
 
 load_dotenv()
@@ -31,8 +31,12 @@ def _echo_json(payload: dict) -> None:
 def run(
     repo: str = typer.Option(..., "--repo", help="Local path or GitHub URL"),
     out: str = typer.Option(".cartography", "--out", help="Output directory for artifacts"),
-    incremental: bool = typer.Option(False, "--incremental", help="Best-effort incremental mode"),
-    llm_enabled: bool = typer.Option(False, "--llm", help="Enable LLM-powered semantic analysis"),
+    incremental: bool = typer.Option(
+        False, "--incremental/--no-incremental", help="Best-effort incremental mode"
+    ),
+    llm_enabled: bool = typer.Option(
+        False, "--llm/--no-llm", help="Enable LLM-powered semantic analysis"
+    ),
     keep_clone: bool = typer.Option(False, "--keep-clone", help="If repo is a URL, keep the cloned temp dir"),
 ) -> None:
     """
@@ -105,6 +109,18 @@ def explain_module(
         module_path=path,
         semantic_index_dir=semantic_index_dir,
     )
+    _echo_json(result)
+
+
+@query_app.command("ask")
+def ask(
+    question: str = typer.Option(..., "--question", help="Natural-language question about the codebase"),
+    out: str = typer.Option(".cartography", "--out", help="Artifact output directory"),
+) -> None:
+    out_path = Path(out)
+    if not out_path.is_absolute():
+        out_path = (_project_root() / out).resolve()
+    result = query_natural_language(question=question, out_dir=str(out_path))
     _echo_json(result)
 
 

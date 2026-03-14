@@ -12,7 +12,12 @@ import networkx as nx
 import numpy as np
 from networkx.readwrite import json_graph
 
-from ..analyzers.tree_sitter_analyzer import LanguageRouter, analyze_module, iter_source_files
+from ..analyzers.tree_sitter_analyzer import (
+    LanguageRouter,
+    analyze_module,
+    analyze_modules_parallel,
+    iter_source_files,
+)
 from ..models.nodes import ModuleNode
 
 
@@ -54,10 +59,10 @@ def _python_module_index(repo_root: str) -> dict[str, str]:
     """
     Map dotted module names to file paths for .py files within repo_root.
     """
-    root = Path(repo_root)
+    root = Path(repo_root).resolve()
     index: dict[str, str] = {}
-    for p in root.rglob("*.py"):
-        if any(part in {".git", ".venv", "venv", "__pycache__", ".cartography"} for part in p.parts):
+    for p in iter_source_files(repo_root):
+        if p.suffix.lower() != ".py":
             continue
         rel = p.relative_to(root).with_suffix("")
         dotted = ".".join(rel.parts)
@@ -115,7 +120,13 @@ class SurveyorResult:
     dead_code_candidates: dict[str, list[str]]
 
 
-def run_surveyor(repo_root: str) -> SurveyorResult:
+def run_surveyor(repo_root: str, changed_paths: list[str] | None = None) -> SurveyorResult:
+    """
+    Build full module graph.
+
+    Incremental semantics are best-effort: when changed_paths is provided we parse those files
+    first for speed signals, but still keep graph output complete and deterministic.
+    """
     router = LanguageRouter.create()
     module_index = _python_module_index(repo_root)
 
@@ -123,6 +134,13 @@ def run_surveyor(repo_root: str) -> SurveyorResult:
     g = nx.DiGraph()
 
     files = list(iter_source_files(repo_root))
+    changed_abs: set[str] = set()
+    if changed_paths:
+        root = Path(repo_root).resolve()
+        for rel in changed_paths:
+            p = (root / rel).resolve()
+            if p.exists():
+                changed_abs.add(str(p))
     py_files = [p for p in files if p.suffix.lower() == ".py"]
     js_files = [p for p in files if p.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}]
 
@@ -155,8 +173,17 @@ def run_surveyor(repo_root: str) -> SurveyorResult:
         if running / total_changes >= 0.80 or (i + 1) / max(len(sorted_files), 1) >= 0.20:
             break
 
+    all_paths = [str(p) for p in files]
+    # Parse in parallel (T051). Prioritize changed files to reduce perceived latency.
+    prioritized = [p for p in all_paths if p in changed_abs] + [p for p in all_paths if p not in changed_abs]
+    parsed_modules = analyze_modules_parallel(prioritized, max_workers=8)
+    modules_by_path = {m.path: m for m in parsed_modules}
+
     for p in files:
-        m = analyze_module(str(p), router)
+        m = modules_by_path.get(str(p))
+        if m is None:
+            # fallback for unexpected parse misses
+            m = analyze_module(str(p), router)
         m.change_velocity_30d = velocities.get(str(p), 0)
         module_nodes.append(m)
 

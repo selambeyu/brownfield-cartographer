@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { normalizeOutDir } from "@/lib/cartography";
 
 type AgentId = "surveyor" | "hydrologist";
 
@@ -8,6 +9,7 @@ type ApiNode = {
   id: string;
   label: string;
   group: string;
+  isDeadCode?: boolean;
 };
 
 type ApiLink = {
@@ -20,57 +22,75 @@ type GraphResponse = {
   links: ApiLink[];
 };
 
-function getProjectRoot(): string {
-  // Next.js app is in web/, project root is one level up.
-  return path.resolve(process.cwd(), "..");
+type JsonObject = Record<string, unknown>;
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
 }
 
-async function loadJson(agent: AgentId): Promise<any> {
-  const projectRoot = getProjectRoot();
+function asObject(value: unknown): JsonObject {
+  return value !== null && typeof value === "object" ? (value as JsonObject) : {};
+}
+
+async function loadJson(agent: AgentId, outDir: string): Promise<JsonObject> {
   let jsonPath: string;
 
   if (agent === "surveyor") {
-    jsonPath = path.join(projectRoot, ".cartography", "module_graph.json");
+    jsonPath = path.join(outDir, "module_graph.json");
   } else if (agent === "hydrologist") {
-    jsonPath = path.join(projectRoot, ".cartography", "lineage_graph.json");
+    jsonPath = path.join(outDir, "lineage_graph.json");
   } else {
     throw new Error(`Unsupported agent: ${agent}`);
   }
 
   const raw = await fs.readFile(jsonPath, "utf8");
-  return JSON.parse(raw);
+  return asObject(JSON.parse(raw));
 }
 
-function normalizeSurveyor(data: any): GraphResponse {
-  const nodes: ApiNode[] = (data.nodes ?? []).map((n: any) => {
-    const id = String(n.id);
-    const fullPath: string | undefined = n.path;
+function normalizeSurveyor(data: JsonObject): GraphResponse {
+  const nodes: ApiNode[] = asArray(data.nodes).map((nodeRaw) => {
+    const n = asObject(nodeRaw);
+    const id = String(n.id ?? "");
+    const fullPath = typeof n.path === "string" ? n.path : undefined;
     const base = fullPath ? path.basename(fullPath) : id;
+    const deadCodeCandidates = asArray(n.dead_code_candidates);
+    const isDeadCode =
+      n.is_dead_code_candidate === true || deadCodeCandidates.length > 0;
     return {
       id,
       label: base,
-      group: n.language ?? n.type ?? "module",
+      group:
+        typeof n.language === "string"
+          ? n.language
+          : typeof n.type === "string"
+            ? n.type
+            : "module",
+      isDeadCode,
     };
   });
 
-  const rawEdges = data.links ?? data.edges ?? [];
+  const rawEdges = asArray(data.links).length > 0 ? asArray(data.links) : asArray(data.edges);
   const links: ApiLink[] = rawEdges
-    .map((e: any) => ({
-      source: String(e.source),
-      target: String(e.target),
-    }))
+    .map((edgeRaw) => {
+      const e = asObject(edgeRaw);
+      return {
+        source: String(e.source ?? ""),
+        target: String(e.target ?? ""),
+      };
+    })
     .filter((e: ApiLink) => e.source && e.target);
 
   return { nodes, links };
 }
 
-function normalizeHydrologist(data: any): GraphResponse {
-  const nodes: ApiNode[] = (data.nodes ?? []).map((n: any) => {
-    const id = String(n.id);
-    const type: string = n.type ?? "unknown";
-    let label: string = n.name ?? "";
+function normalizeHydrologist(data: JsonObject): GraphResponse {
+  const nodes: ApiNode[] = asArray(data.nodes).map((nodeRaw) => {
+    const n = asObject(nodeRaw);
+    const id = String(n.id ?? "");
+    const type = typeof n.type === "string" ? n.type : "unknown";
+    let label = typeof n.name === "string" ? n.name : "";
 
-    if (!label && typeof n.source_file === "string") {
+    if (!label && typeof n.source_file === "string" && n.source_file) {
       label = path.basename(n.source_file);
     }
     if (!label) {
@@ -84,21 +104,25 @@ function normalizeHydrologist(data: any): GraphResponse {
     };
   });
 
-  const links: ApiLink[] = (data.edges ?? [])
-    .map((e: any) => ({
-      source: String(e.source),
-      target: String(e.target),
-    }))
+  const links: ApiLink[] = asArray(data.edges)
+    .map((edgeRaw) => {
+      const e = asObject(edgeRaw);
+      return {
+        source: String(e.source ?? ""),
+        target: String(e.target ?? ""),
+      };
+    })
     .filter((e: ApiLink) => e.source && e.target);
 
   return { nodes, links };
 }
 
 export async function GET(
-  _request: Request,
-  context: { params: Promise<{ agent: AgentId }> },
+  request: Request,
+  context: { params: Promise<{ agent: string }> },
 ) {
   const { agent } = await context.params;
+  const out = normalizeOutDir(new URL(request.url).searchParams.get("out") ?? undefined);
 
   if (agent !== "surveyor" && agent !== "hydrologist") {
     return NextResponse.json(
@@ -108,7 +132,7 @@ export async function GET(
   }
 
   try {
-    const raw = await loadJson(agent);
+    const raw = await loadJson(agent as AgentId, out);
     const normalized =
       agent === "surveyor" ? normalizeSurveyor(raw) : normalizeHydrologist(raw);
 

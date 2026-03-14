@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Literal
@@ -7,6 +8,7 @@ from typing import Iterable, Literal
 from tree_sitter import Node, Parser
 from tree_sitter_languages import get_parser
 
+from ..ignore_rules import IgnoreRules
 from ..models.evidence import EvidenceRef
 from ..models.nodes import ClassDef, ModuleNode
 
@@ -67,12 +69,13 @@ class LanguageRouter:
 
 
 def iter_source_files(repo_root: str) -> Iterable[Path]:
-    root = Path(repo_root)
+    root = Path(repo_root).resolve()
+    ignore_rules = IgnoreRules.default()
     for p in root.rglob("*"):
         if not p.is_file():
             continue
-        # skip common noise
-        if any(part in {".git", ".venv", "venv", "__pycache__", ".cartography"} for part in p.parts):
+        rel = p.relative_to(root)
+        if ignore_rules.should_skip(rel):
             continue
         lang = _ext_language(p)
         if lang in {"python", "sql", "yaml", "javascript", "typescript", "notebook"}:
@@ -194,6 +197,31 @@ def analyze_module(path: str, router: LanguageRouter) -> ModuleNode:
     if module.loc and module.loc > 0:
         module.comment_ratio = min(1.0, comment_nodes / module.loc)
     return module
+
+
+def analyze_modules_parallel(paths: list[str], max_workers: int = 8) -> list[ModuleNode]:
+    """
+    Parse modules in parallel with a bounded worker pool.
+
+    Each worker creates its own LanguageRouter to avoid parser sharing across threads.
+    """
+    if not paths:
+        return []
+    bounded_workers = max(1, min(max_workers, 16))
+    out: list[ModuleNode] = []
+
+    def _task(path: str) -> ModuleNode:
+        return analyze_module(path, LanguageRouter.create())
+
+    with ThreadPoolExecutor(max_workers=bounded_workers) as ex:
+        futures = {ex.submit(_task, p): p for p in paths}
+        for fut in as_completed(futures):
+            try:
+                out.append(fut.result())
+            except Exception:
+                # Best-effort: skip unparseable files here; agent-level trace records coverage.
+                continue
+    return out
 
 
 def _first_string_arg(source: bytes, call_node: Node) -> str | None:

@@ -199,6 +199,7 @@ def run_archivist(
     module_graph_path: str,
     lineage_graph_path: str,
     semantic_index_dir: str | None = None,
+    changed_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     out_dir = Path(cfg.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -230,6 +231,20 @@ def run_archivist(
 
     codebase_path = out_dir / "CODEBASE.md"
     onboarding_path = out_dir / "onboarding_brief.md"
+
+    # Artifact regeneration rules (best-effort):
+    # - if no changed paths and both artifacts exist, reuse existing files.
+    if changed_paths is not None and len(changed_paths) == 0 and codebase_path.exists() and onboarding_path.exists():
+        return {
+            "codebase_path": str(codebase_path),
+            "onboarding_brief_path": str(onboarding_path),
+            "module_count": len(module_graph.get("nodes", [])),
+            "lineage_nodes": len(lineage_graph.get("nodes", [])),
+            "semantic_modules": len(semantic_modules),
+            "reused": True,
+            "reuse_reason": "no_changed_files",
+        }
+
     codebase_path.write_text(codebase_md, encoding="utf-8")
     onboarding_path.write_text(onboarding_md, encoding="utf-8")
 
@@ -239,5 +254,6 @@ def run_archivist(
         "module_count": len(module_graph.get("nodes", [])),
         "lineage_nodes": len(lineage_graph.get("nodes", [])),
         "semantic_modules": len(semantic_modules),
+        "reused": False,
     }
 

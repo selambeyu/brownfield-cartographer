@@ -37,6 +37,19 @@ AIRFLOW_TASK_PREFIX = "airflow_task:"
 UNRESOLVED_PREFIX = "dataset:__unresolved__"
 
 
+def _agent_error_event(path: str, error: Exception | str, *, stage: str) -> dict[str, Any]:
+    message = str(error)
+    error_type = type(error).__name__ if isinstance(error, Exception) else "AgentError"
+    return {
+        "event": "agent_error",
+        "stage": stage,
+        "path": path,
+        "error_type": error_type,
+        "message": message,
+        "recoverable": True,
+    }
+
+
 def _dataset_id(name: str, unresolved: bool = False, evidence_key: str | None = None) -> str:
     if unresolved or not name:
         key = evidence_key or str(id(name))
@@ -202,13 +215,19 @@ def _extract_notebook_data_flow(path: Path) -> list[tuple[str | None, str, Evide
     return items
 
 
-def run_hydrologist(repo_root: str) -> tuple[nx.DiGraph, list[dict[str, Any]]]:
+def run_hydrologist(
+    repo_root: str,
+    changed_paths: list[str] | None = None,
+) -> tuple[nx.DiGraph, list[dict[str, Any]]]:
     """
     Build the lineage DAG from SQL, YAML config, and Python files in the repo.
 
     Returns (lineage_graph, trace_events). Trace events include parse errors,
     unresolved refs, and coverage metrics. Unresolved references are added as
     dataset nodes with is_unresolved=True.
+
+    Incremental semantics are best-effort: when changed_paths is provided, only changed
+    source files are scanned for lineage updates.
     """
     g: nx.DiGraph = nx.DiGraph()
     trace_events: list[dict[str, Any]] = []
@@ -218,14 +237,21 @@ def run_hydrologist(repo_root: str) -> tuple[nx.DiGraph, list[dict[str, Any]]]:
     files_python = 0
     unresolved_count = 0
 
-    root = Path(repo_root)
+    root = Path(repo_root).resolve()
+    changed_abs: set[str] = set()
+    if changed_paths:
+        for rel in changed_paths:
+            p = (root / rel).resolve()
+            if p.exists():
+                changed_abs.add(str(p))
+
     for path in iter_source_files(repo_root):
         p = Path(path)
         if p.suffix.lower() == ".sql":
             files_sql += 1
             res = extract_sql_lineage_from_file(p)
             if res.parse_error:
-                trace_events.append({"event": "sql_parse_error", "path": res.path, "message": res.parse_error})
+                trace_events.append(_agent_error_event(res.path, res.parse_error, stage="sql_parse"))
                 continue
             evidence = res.evidence
             line_start = evidence.line_start or 1
@@ -249,7 +275,7 @@ def run_hydrologist(repo_root: str) -> tuple[nx.DiGraph, list[dict[str, Any]]]:
             files_yaml += 1
             cfg = extract_dag_config(p)
             if cfg.parse_error:
-                trace_events.append({"event": "yaml_parse_error", "path": cfg.path, "message": cfg.parse_error})
+                trace_events.append(_agent_error_event(cfg.path, cfg.parse_error, stage="yaml_parse"))
                 continue
             for model_name in cfg.models:
                 _ensure_dataset_node(g, model_name, "table", evidence=cfg.evidence)
@@ -288,13 +314,15 @@ def run_hydrologist(repo_root: str) -> tuple[nx.DiGraph, list[dict[str, Any]]]:
             try:
                 source_bytes = p.read_bytes()
             except Exception as e:
-                trace_events.append({"event": "read_error", "path": str(p), "message": str(e)})
+                trace_events.append(_agent_error_event(str(p), e, stage="read_file"))
                 continue
             # Airflow DAG parsing (pipeline topology from config/code)
             airflow_res = extract_airflow_dag_from_file(p)
             if airflow_res.tasks or airflow_res.dependencies:
                 if airflow_res.parse_error:
-                    trace_events.append({"event": "airflow_parse_error", "path": airflow_res.path, "message": airflow_res.parse_error})
+                    trace_events.append(
+                        _agent_error_event(airflow_res.path, airflow_res.parse_error, stage="airflow_parse")
+                    )
                 else:
                     task_ids = {t["task_id"] for t in airflow_res.tasks}
                     for task in airflow_res.tasks:
@@ -361,6 +389,9 @@ def run_hydrologist(repo_root: str) -> tuple[nx.DiGraph, list[dict[str, Any]]]:
         "files_sql": files_sql,
         "files_yaml": files_yaml,
         "files_python": files_python,
+        "files_notebook": sum(1 for n in g.nodes if str(n).startswith(TRANSFORMATION_PREFIX) and "ipynb" in str(n)),
+        "incremental": bool(changed_abs),
+        "changed_paths_count": len(changed_abs),
         "nodes": g.number_of_nodes(),
         "edges": g.number_of_edges(),
         "unresolved_refs": unresolved_count,
