@@ -228,7 +228,7 @@
       "purpose_statement": null,
       "domain_cluster": null,
       "complexity_score": 17.0,
-      "change_velocity_30d": 2,
+      "change_velocity_30d": 0,
       "is_dead_code_candidate": true,
       "last_modified": null,
       "loc": 276,

@@ -1,0 +1,64 @@
+{
+  "clusters": {
+    "0": {
+      "modules": [
+        "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/dbt_project.yml"
+      ],
+      "label": "the / and / data / for / module"
+    },
+    "1": {
+      "modules": [
+        "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/schema.yml"
+      ],
+      "label": "the / order / and / customer / orders"
+    },
+    "2": {
+      "modules": [
+        "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/customers.sql"
+      ],
+      "label": "the / and / order / customer / to"
+    },
+    "3": {
+      "modules": [
+        "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/orders.sql"
+      ],
+      "label": "the / payments / table / order / orders"
+    },
+    "4": {
+      "modules": [
+        "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/logs/query_log.sql"
+      ],
+      "label": "the / user / and / module / is"
+    },
+    "5": {
+      "modules": [
+        "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/staging/schema.yml",
+        "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/staging/stg_orders.sql"
+      ],
+      "label": "the / and / orders / is / to"
+    },
+    "6": {
+      "modules": [
+        "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/staging/stg_customers.sql"
+      ],
+      "label": "the / and / data / it / module"
+    },
+    "7": {
+      "modules": [
+        "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/staging/stg_payments.sql"
+      ],
+      "label": "the / payment / module / data / outputs"
+    }
+  },
+  "assignments": {
+    "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/dbt_project.yml": 0,
+    "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/schema.yml": 1,
+    "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/customers.sql": 2,
+    "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/orders.sql": 3,
+    "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/logs/query_log.sql": 4,
+    "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/staging/schema.yml": 5,
+    "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/staging/stg_customers.sql": 6,
+    "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/staging/stg_payments.sql": 7,
+    "/Users/melkam/Documents/10 Academy/Week4/jaffle-shop-classic/models/staging/stg_orders.sql": 5
+  }
+}
