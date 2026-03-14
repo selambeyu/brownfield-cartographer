@@ -12,6 +12,13 @@ class RunConfig(BaseModel):
     llm_enabled: bool = False
 
 
+class ArtifactMetadata(BaseModel):
+    artifact_version: str = "0.1"
+    run_id: str
+    repo_ref: str
+    generated_at: str
+
+
 class GraphArtifact(BaseModel):
     schema_version: str = "0.1"
     graph_type: Literal["module_graph", "lineage_graph", "knowledge_graph"] = "knowledge_graph"

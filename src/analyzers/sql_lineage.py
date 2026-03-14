@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import re
 
 import sqlglot
 import sqlglot.expressions as exp
@@ -87,13 +88,30 @@ def extract_sql_lineage(
     lines = source.count("\n") + 1
     evidence = EvidenceRef(path=path, line_start=1, line_end=lines)
 
-    try:
-        parsed = sqlglot.parse(source, dialect=dialect)
-    except Exception as e:
+    parse_error: str | None = None
+    parsed: list[exp.Expression | None] | None = None
+
+    # Try requested dialect first, then fall back across supported dialects.
+    # This improves coverage for mixed SQL/dbt repositories.
+    if dialect is not None:
+        dialect_candidates: list[str | None] = [dialect]
+    else:
+        dialect_candidates = list(SUPPORTED_DIALECTS)
+
+    for d in dialect_candidates:
+        try:
+            parsed = sqlglot.parse(source, dialect=d)
+            parse_error = None
+            break
+        except Exception as e:
+            parse_error = str(e)
+            parsed = None
+
+    if parsed is None:
         return SQLLineageResult(
             path=path,
             evidence=evidence,
-            parse_error=str(e),
+            parse_error=parse_error or "Failed to parse SQL",
         )
 
     if not parsed:
@@ -105,7 +123,16 @@ def extract_sql_lineage(
     cte_deps: dict[str, list[str]] = {}
 
     for statement in parsed:
-        stmt = statement.unnest()
+        # sqlglot can return None-like entries for unsupported/opaque commands.
+        # Skip them instead of failing the whole Hydrologist phase.
+        if statement is None:
+            continue
+        try:
+            stmt = statement.unnest()
+        except Exception:
+            continue
+        if stmt is None:
+            continue
         if isinstance(stmt, exp.Insert):
             # INSERT INTO target SELECT ... FROM sources
             target_expr = stmt.this
@@ -166,6 +193,65 @@ def extract_sql_lineage(
     )
 
 
+def _strip_jinja(source: str) -> str:
+    """
+    Best-effort removal of dbt/Jinja templating so sqlglot can parse the remaining SQL.
+
+    We remove:
+      - Block tags: {% ... %}, {%- ... -%}
+      - Expression tags: {{ ... }}
+      - Comment tags: {# ... #}
+
+    This is intentionally conservative: when a file is mostly macros, the result may
+    be empty (no lineage), but we avoid hard parse errors while keeping real SQL.
+    """
+    # Remove Jinja/ dbt comments first
+    s = re.sub(r"\{#.*?#\}", " ", source, flags=re.DOTALL)
+    # Preserve dbt ref/source calls as SQL-friendly placeholders for lineage.
+    # {{ ref('model_name') }} -> model_name
+    s = re.sub(
+        r"\{\{\s*ref\(\s*['\"]([A-Za-z0-9_./-]+)['\"][^)]*\)\s*\}\}",
+        lambda m: m.group(1).replace("-", "_").replace("/", "_").replace(".", "_"),
+        s,
+        flags=re.IGNORECASE,
+    )
+    # {{ source('schema_name', 'table_name') }} -> schema_name.table_name
+    s = re.sub(
+        r"\{\{\s*source\(\s*['\"]([A-Za-z0-9_./-]+)['\"]\s*,\s*['\"]([A-Za-z0-9_./-]+)['\"][^)]*\)\s*\}\}",
+        lambda m: f"{m.group(1).replace('-', '_').replace('/', '_')}.{m.group(2).replace('-', '_').replace('/', '_')}",
+        s,
+        flags=re.IGNORECASE,
+    )
+    # {{ this }} -> current_model (dbt relation placeholder)
+    s = re.sub(r"\{\{\s*this\s*\}\}", "current_model", s, flags=re.IGNORECASE)
+    # Remove block tags (macros, control flow)
+    s = re.sub(r"\{%-?.*?-%\}", " ", s, flags=re.DOTALL)
+    s = re.sub(r"\{%.*?%\}", " ", s, flags=re.DOTALL)
+    # Replace remaining inline expressions with SQL-safe literal.
+    s = re.sub(r"\{\{.*?\}\}", " 0 ", s, flags=re.DOTALL)
+    return s
+
+
+def _extract_dbt_dependencies(source: str) -> set[str]:
+    """
+    Extract table/model dependencies directly from dbt Jinja references.
+
+    This makes dbt a first-class lineage input even when SQL parsing is partial.
+    - ref('model') -> model
+    - source('schema', 'table') -> schema.table
+    """
+    deps: set[str] = set()
+    for m in re.finditer(r"ref\(\s*['\"]([A-Za-z0-9_./-]+)['\"][^)]*\)", source, flags=re.IGNORECASE):
+        deps.add(m.group(1))
+    for m in re.finditer(
+        r"source\(\s*['\"]([A-Za-z0-9_./-]+)['\"]\s*,\s*['\"]([A-Za-z0-9_./-]+)['\"][^)]*\)",
+        source,
+        flags=re.IGNORECASE,
+    ):
+        deps.add(f"{m.group(1)}.{m.group(2)}")
+    return deps
+
+
 def extract_tables_from_sql_string(sql: str) -> tuple[list[str], str | None]:
     """
     Parse a SQL string and return (source_tables, target_table).
@@ -189,5 +275,40 @@ def extract_sql_lineage_from_file(
             evidence=EvidenceRef(path=str(path)),
             parse_error="File not found",
         )
+    # dbt macro files are template libraries, not executable model SQL.
+    # Skip them to avoid noisy parse errors and false lineage.
+    if "macros" in path.parts:
+        return SQLLineageResult(
+            path=str(path),
+            evidence=EvidenceRef(path=str(path), line_start=1, line_end=1),
+            target_table=None,
+            source_tables=[],
+            cte_dependencies={},
+            parse_error=None,
+        )
+
     source = path.read_text(encoding="utf-8", errors="replace")
-    return extract_sql_lineage(str(path), source, dialect=dialect)
+    dbt_deps = _extract_dbt_dependencies(source)
+    # Many dbt projects include Jinja macros and control flow in .sql files.
+    # Strip templating before handing to sqlglot so we avoid parse errors on
+    # tokens like `{% macro ... %}` while still extracting lineage from the
+    # underlying SELECT / INSERT / CREATE statements.
+    cleaned = _strip_jinja(source)
+    res = extract_sql_lineage(str(path), cleaned, dialect=dialect)
+
+    # First-class dbt lineage fallback: preserve ref()/source() deps even if
+    # sqlglot cannot fully parse templated model SQL.
+    if dbt_deps:
+        merged_sources = sorted(set(res.source_tables) | dbt_deps)
+        if res.parse_error:
+            return SQLLineageResult(
+                path=res.path,
+                evidence=res.evidence,
+                target_table=res.target_table,
+                source_tables=merged_sources,
+                cte_dependencies=res.cte_dependencies,
+                parse_error=None,
+            )
+        res.source_tables = merged_sources
+
+    return res

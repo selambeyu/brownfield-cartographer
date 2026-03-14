@@ -9,6 +9,8 @@ and trace (no silent omission).
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,11 @@ import networkx as nx
 
 from ..analyzers.airflow_dag_parser import AirflowDAGResult, extract_airflow_dag_from_file
 from ..analyzers.dag_config_parser import DAGConfigResult, extract_dag_config
-from ..analyzers.sql_lineage import SQLLineageResult, extract_sql_lineage_from_file
+from ..analyzers.sql_lineage import (
+    SQLLineageResult,
+    extract_sql_lineage_from_file,
+    extract_tables_from_sql_string,
+)
 from ..analyzers.tree_sitter_analyzer import (
     LanguageRouter,
     extract_python_data_flow,
@@ -136,6 +142,66 @@ def _add_triggers(g: nx.DiGraph, upstream_id: str, downstream_id: str, edge_attr
         g.add_edge(upstream_id, downstream_id, type="TRIGGERS", **edge_attrs)
 
 
+def _extract_notebook_data_flow(path: Path) -> list[tuple[str | None, str, EvidenceRef]]:
+    """
+    Parse .ipynb code cells for basic data IO patterns.
+
+    Returns tuples of (dataset_name_or_none, kind["read"|"write"], evidence).
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    cells = raw.get("cells")
+    if not isinstance(cells, list):
+        return []
+
+    items: list[tuple[str | None, str, EvidenceRef]] = []
+    # pandas/PySpark-like IO patterns plus SQL strings.
+    io_pattern = re.compile(
+        r"""(?ix)
+        (?:
+            \bread_(?:csv|parquet|sql|table)\s*\(\s*["']([^"']+)["'] |
+            \bto_(?:csv|parquet|sql)\s*\(\s*["']([^"']+)["'] |
+            \bsaveAsTable\s*\(\s*["']([^"']+)["'] |
+            \btable\s*\(\s*["']([^"']+)["']
+        )
+        """
+    )
+    # execute("select ...") / spark.sql("...")
+    sql_call_pattern = re.compile(r"""(?is)\b(?:execute|sql)\s*\(\s*["'](select|with|insert|create).*?["']\s*\)""")
+
+    for i, cell in enumerate(cells):
+        if not isinstance(cell, dict) or cell.get("cell_type") != "code":
+            continue
+        src = cell.get("source")
+        if isinstance(src, list):
+            code = "".join(str(x) for x in src)
+        else:
+            code = str(src or "")
+        ev = EvidenceRef(path=str(path), line_start=i + 1, line_end=i + 1)
+
+        for m in io_pattern.finditer(code):
+            dataset = next((g for g in m.groups() if g), None)
+            if dataset is None:
+                continue
+            snippet = m.group(0).lower()
+            kind = "read"
+            if any(x in snippet for x in ("to_csv", "to_parquet", "to_sql", "saveastable")):
+                kind = "write"
+            items.append((dataset, kind, ev))
+
+        for sql_match in re.finditer(r"""(?is)\b(?:execute|sql)\s*\(\s*["'](.+?)["']\s*\)""", code):
+            sql_str = sql_match.group(1)
+            src_tables, tgt_table = extract_tables_from_sql_string(sql_str)
+            for t in src_tables:
+                items.append((t, "read", ev))
+            if tgt_table:
+                items.append((tgt_table, "write", ev))
+
+    return items
+
+
 def run_hydrologist(repo_root: str) -> tuple[nx.DiGraph, list[dict[str, Any]]]:
     """
     Build the lineage DAG from SQL, YAML config, and Python files in the repo.
@@ -189,6 +255,33 @@ def run_hydrologist(repo_root: str) -> tuple[nx.DiGraph, list[dict[str, Any]]]:
                 _ensure_dataset_node(g, model_name, "table", evidence=cfg.evidence)
             for src_name in cfg.sources:
                 _ensure_dataset_node(g, src_name, "table", evidence=cfg.evidence)
+            for src_tbl in cfg.source_tables:
+                _ensure_dataset_node(g, src_tbl, "table", evidence=cfg.evidence)
+            # If YAML contains explicit depends_on refs, wire config-derived topology.
+            for model_name, deps in cfg.model_dependencies.items():
+                trans_id = _ensure_transformation_node(
+                    g,
+                    cfg.path,
+                    cfg.evidence.line_start or 1,
+                    cfg.evidence.line_end,
+                    "dbt_config",
+                    evidence=cfg.evidence,
+                )
+                model_id = _ensure_dataset_node(g, model_name, "table", evidence=cfg.evidence)
+                _add_produces(
+                    g,
+                    trans_id,
+                    model_id,
+                    {"transformation_type": "dbt_config", "source_file": cfg.path, "line_range": (cfg.evidence.line_start or 1, cfg.evidence.line_end or (cfg.evidence.line_start or 1))},
+                )
+                for dep in deps:
+                    dep_id = _ensure_dataset_node(g, dep, "table", evidence=cfg.evidence)
+                    _add_consumes(
+                        g,
+                        dep_id,
+                        trans_id,
+                        {"transformation_type": "dbt_config", "source_file": cfg.path, "line_range": (cfg.evidence.line_start or 1, cfg.evidence.line_end or (cfg.evidence.line_start or 1))},
+                    )
 
         elif p.suffix.lower() == ".py":
             files_python += 1
@@ -232,6 +325,36 @@ def run_hydrologist(repo_root: str) -> tuple[nx.DiGraph, list[dict[str, Any]]]:
                     _add_consumes(g, ds_id, trans_id, {"transformation_type": "python", "source_file": str(p), "line_range": (line_start, line_end)})
                 else:
                     _add_produces(g, trans_id, ds_id, {"transformation_type": "python", "source_file": str(p), "line_range": (line_start, line_end)})
+
+        elif p.suffix.lower() == ".ipynb":
+            # Notebook support for mixed DS/DE pipelines.
+            for name, kind, ev in _extract_notebook_data_flow(p):
+                line_start = ev.line_start or 1
+                line_end = ev.line_end or line_start
+                trans_id = _ensure_transformation_node(g, str(p), line_start, line_end, "notebook", evidence=ev)
+                unresolved = name is None or name == ""
+                if unresolved:
+                    name = "dynamic reference, cannot resolve"
+                    unresolved_count += 1
+                ev_key = f"{ev.path}:{ev.line_start or 0}:{ev.line_end or 0}"
+                ds_id = _ensure_dataset_node(
+                    g,
+                    name,
+                    "file" if kind == "read" else "table",
+                    unresolved=unresolved,
+                    evidence=ev,
+                    evidence_key=ev_key if unresolved else None,
+                )
+                if kind == "read":
+                    _add_consumes(
+                        g, ds_id, trans_id,
+                        {"transformation_type": "notebook", "source_file": str(p), "line_range": (line_start, line_end)},
+                    )
+                else:
+                    _add_produces(
+                        g, trans_id, ds_id,
+                        {"transformation_type": "notebook", "source_file": str(p), "line_range": (line_start, line_end)},
+                    )
 
     trace_events.append({
         "event": "lineage_coverage",

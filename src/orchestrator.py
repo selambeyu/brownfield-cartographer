@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from .agents.archivist import run_archivist
+from .agents.semanticist import llm_config_from_env, run_semanticist
 from .agents.hydrologist import run_hydrologist, write_lineage_graph_json
 from .agents.surveyor import run_surveyor, write_module_graph_json
 from .models.evidence import TraceEvent, utc_now_iso, write_trace_event
@@ -23,6 +25,8 @@ def run_pipeline(cfg: RunConfig) -> RunResult:
 
     run_id = uuid4().hex
     trace_path = str(out_dir / "cartography_trace.jsonl")
+    module_graph_path = str(out_dir / "module_graph.json")
+    lineage_graph_path = str(out_dir / "lineage_graph.json")
 
     def emit(event: TraceEvent) -> None:
         write_trace_event(trace_path, event)
@@ -33,7 +37,6 @@ def run_pipeline(cfg: RunConfig) -> RunResult:
     emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_start", phase="surveyor"))
     try:
         survey = run_surveyor(cfg.repo)
-        module_graph_path = str(out_dir / "module_graph.json")
         write_module_graph_json(survey.module_graph, module_graph_path)
         dead_count = sum(len(v) for v in survey.dead_code_candidates.values())
         avg_cc = None
@@ -78,7 +81,6 @@ def run_pipeline(cfg: RunConfig) -> RunResult:
     emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_start", phase="hydrologist"))
     try:
         lineage_graph, lineage_trace = run_hydrologist(cfg.repo)
-        lineage_graph_path = str(out_dir / "lineage_graph.json")
         write_lineage_graph_json(lineage_graph, lineage_graph_path)
         for ev in lineage_trace:
             emit(
@@ -111,10 +113,71 @@ def run_pipeline(cfg: RunConfig) -> RunResult:
         )
     emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_end", phase="hydrologist"))
 
-    # Remaining phases: placeholders until implemented
-    for phase in ["archivist", "semanticist", "navigator"]:
-        emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_start", phase=phase))
-        emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_end", phase=phase))
+    # Phase: Semanticist (LLM-powered purpose analysis, domain clustering, Day-One scaffold)
+    emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_start", phase="semanticist"))
+    try:
+        # When --llm is set, use env-based config (CARTOGRAPHER_LLM_PROVIDER, OLLAMA_*, OPENAI_*, etc.).
+        llm_cfg = llm_config_from_env() if cfg.llm_enabled else None
+        metrics = run_semanticist(
+            cfg,
+            module_graph_path=module_graph_path,
+            lineage_graph_path=lineage_graph_path,
+            llm=llm_cfg,
+        )
+        emit(
+            TraceEvent(
+                ts=utc_now_iso(),
+                run_id=run_id,
+                event="metric",
+                phase="semanticist",
+                data=metrics,
+            )
+        )
+    except Exception as e:
+        emit(
+            TraceEvent(
+                ts=utc_now_iso(),
+                run_id=run_id,
+                event="error",
+                phase="semanticist",
+                message=str(e),
+            )
+        )
+    emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_end", phase="semanticist"))
+
+    # Phase: Archivist (generate living context artifacts)
+    emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_start", phase="archivist"))
+    try:
+        metrics = run_archivist(
+            cfg,
+            run_id=run_id,
+            module_graph_path=module_graph_path,
+            lineage_graph_path=lineage_graph_path,
+        )
+        emit(
+            TraceEvent(
+                ts=utc_now_iso(),
+                run_id=run_id,
+                event="metric",
+                phase="archivist",
+                data=metrics,
+            )
+        )
+    except Exception as e:
+        emit(
+            TraceEvent(
+                ts=utc_now_iso(),
+                run_id=run_id,
+                event="error",
+                phase="archivist",
+                message=str(e),
+            )
+        )
+    emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_end", phase="archivist"))
+
+    # Phase: Navigator (placeholder until query CLI is implemented)
+    emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_start", phase="navigator"))
+    emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="phase_end", phase="navigator"))
 
     emit(TraceEvent(ts=utc_now_iso(), run_id=run_id, event="run_end"))
 
