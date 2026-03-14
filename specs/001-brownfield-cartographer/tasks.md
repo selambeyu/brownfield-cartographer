@@ -109,13 +109,13 @@ description: "Actionable task list for The Brownfield Cartographer implementatio
 
 ### Implementation for User Story 3 (Archivist → Navigator baseline)
 
-- [ ] T034 [US3] Define artifact schemas/metadata (artifact version, run id, repo ref) in `src/models/graphs.py`
-- [ ] T035 [US3] Implement Archivist artifact generator in `src/agents/archivist.py` to write `.cartography/CODEBASE.md`
-- [ ] T036 [US3] Implement onboarding brief generator in `src/agents/archivist.py` to write `.cartography/onboarding_brief.md` (five Day-One answers; unknowns explicitly marked)
-- [ ] T037 [US3] Ensure every statement in artifacts links back to evidence (file/line) or to a graph node with evidence in `src/agents/archivist.py`
-- [ ] T038 [US3] Wire Archivist into `src/orchestrator.py` after Surveyor + Hydrologist
-- [ ] T039 [US3] Add initial structured query CLI subcommands in `src/cli.py` (no LangGraph yet): `trace-lineage`, `blast-radius`, `explain-module`
-- [ ] T040 [US3] Implement the structured query handlers in `src/agents/navigator.py` (read-only over persisted graphs)
+- [x] T034 [US3] Define artifact schemas/metadata (artifact version, run id, repo ref) in `src/models/graphs.py`
+- [x] T035 [US3] Implement Archivist artifact generator in `src/agents/archivist.py` to write `.cartography/CODEBASE.md`
+- [x] T036 [US3] Implement onboarding brief generator in `src/agents/archivist.py` to write `.cartography/onboarding_brief.md` (five Day-One answers; unknowns explicitly marked)
+- [x] T037 [US3] Ensure every statement in artifacts links back to evidence (file/line) or to a graph node with evidence in `src/agents/archivist.py`
+- [x] T038 [US3] Wire Archivist into `src/orchestrator.py` after Surveyor + Hydrologist
+- [x] T039 [US3] Add initial structured query CLI subcommands in `src/cli.py` (no LangGraph yet): `trace-lineage`, `blast-radius`, `explain-module`
+- [x] T040 [US3] Implement the structured query handlers in `src/agents/navigator.py` (read-only over persisted graphs)
 
 **Checkpoint**: `.cartography/CODEBASE.md` and `.cartography/onboarding_brief.md` exist; CLI can run at least one lineage query + one blast-radius query with citations.
 
@@ -145,8 +145,8 @@ description: "Actionable task list for The Brownfield Cartographer implementatio
 **Purpose**: Quality gates, performance, and completing optional advanced capabilities (Semanticist + LangGraph Navigator).
 
 - [ ] T047 [P] Add `langgraph` dependency and implement natural-language query mode in `src/agents/navigator.py` (keep structured mode intact)
-- [ ] T048 [P] Implement Semanticist scaffolding + “LLM off” graceful degradation in `src/agents/semanticist.py`
-- [ ] T049 Implement semantic index layout under `.cartography/semantic_index/` and update Archivist to include purpose statements in `.cartography/CODEBASE.md`
+- [x] T048 [P] Implement Semanticist scaffolding + “LLM off” graceful degradation in `src/agents/semanticist.py`
+- [x] T049 Implement semantic index layout under `.cartography/semantic_index/` and update Archivist to include purpose statements in `.cartography/CODEBASE.md`
 - [ ] T050 Add performance instrumentation (timings per phase, file counts) to trace in `src/orchestrator.py`
 - [ ] T051 Add parallel file parsing where safe (bounded worker pool) in `src/analyzers/tree_sitter_analyzer.py`
 - [ ] T052 Add basic integration fixture + smoke scripts (non-test) to `README.md` describing how to validate on a target repo

@@ -27,6 +27,39 @@ All generated artifacts are written under `.cartography/` (by default), includin
 - Analyze a Git URL (cloned to a temp dir and removed on exit):
   - `uv run python -m src.cli analyze run --repo https://github.com/octocat/Hello-World.git --out .cartography/`
 
+- Enable LLM-powered semantic analysis (purpose statements, Day-One answers):
+  - `uv run python -m src.cli analyze run --repo /path/to/repo --llm`
+  - Requires `CARTOGRAPHER_LLM_PROVIDER` and provider-specific env vars (see below).
+
+## LLM and environment variables
+
+When you pass `--llm`, the Semanticist phase uses the provider set in the environment.
+
+| Variable | Description |
+|----------|-------------|
+| `CARTOGRAPHER_LLM_PROVIDER` | `ollama`, `openai`, or `anthropic` (omit or `none` = disabled). |
+
+**Ollama** (local):
+
+- `OLLAMA_BASE_URL` — default `http://localhost:11434`
+- `OLLAMA_MODEL_FAST` — model for bulk summaries (default `llama3.2`)
+- `OLLAMA_MODEL_SLOW` — model for synthesis (default same as fast)
+
+**OpenAI** (or compatible API):
+
+- `OPENAI_API_KEY` — required
+- `OPENAI_BASE_URL` — optional (e.g. Azure)
+- `OPENAI_MODEL_FAST` — e.g. `gpt-4o-mini`
+- `OPENAI_MODEL_SLOW` — e.g. `gpt-4o`
+
+**Anthropic**:
+
+- `ANTHROPIC_API_KEY` — required
+- `ANTHROPIC_MODEL_FAST` — e.g. `claude-3-5-haiku-20241022`
+- `ANTHROPIC_MODEL_SLOW` — e.g. `claude-3-5-sonnet-20241022`
+
+Example (Ollama): `export CARTOGRAPHER_LLM_PROVIDER=ollama OLLAMA_MODEL_FAST=llama3.2` then run with `--llm`.
+
 ## Development
 
 - Install dependencies (uv):
